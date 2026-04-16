@@ -5,6 +5,7 @@ import os
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import OrderedDict
 from datetime import datetime, timezone
@@ -19,36 +20,31 @@ RSS_FEED_URL = os.getenv("RSS_FEED_URL", "").strip()
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 
 FIRST_RUN_MODE = os.getenv("FIRST_RUN_MODE", "seed").strip().lower()
-MAX_POSTS_PER_RUN = max(1, int(os.getenv("MAX_POSTS_PER_RUN", "3")))
+MAX_POSTS_PER_RUN = max(1, int(os.getenv("MAX_POSTS_PER_RUN", "2")))
+MULTI_GAME_EMBEDS_LIMIT = max(1, min(10, int(os.getenv("MULTI_GAME_EMBEDS_LIMIT", "5"))))
+STEAM_LOOKUPS_LIMIT = max(1, int(os.getenv("STEAM_LOOKUPS_LIMIT", "6")))
 SEEN_IDS_LIMIT = max(50, int(os.getenv("SEEN_IDS_LIMIT", "400")))
-SUMMARY_LIMIT = max(120, int(os.getenv("SUMMARY_LIMIT", "280")))
+SUMMARY_LIMIT = max(80, int(os.getenv("SUMMARY_LIMIT", "160")))
 REQUEST_TIMEOUT = max(5, int(os.getenv("REQUEST_TIMEOUT", "30")))
 POST_DELAY_SECONDS = max(0.0, float(os.getenv("POST_DELAY_SECONDS", "1")))
+STEAM_REQUEST_DELAY_SECONDS = max(0.0, float(os.getenv("STEAM_REQUEST_DELAY_SECONDS", "0.6")))
+
 USER_AGENT = os.getenv(
     "USER_AGENT",
-    "rss-to-discord-actions/3.0 (+https://github.com/actions)",
+    "rss-to-discord-actions/4.0 (+https://github.com/actions)",
 ).strip()
 
-WEBHOOK_USERNAME = os.getenv("WEBHOOK_USERNAME", "RSS Feed").strip()
+WEBHOOK_USERNAME = os.getenv("WEBHOOK_USERNAME", "FitGirl RSS").strip()
 WEBHOOK_AVATAR_URL = os.getenv("WEBHOOK_AVATAR_URL", "").strip()
 MENTION_TEXT = os.getenv("MENTION_TEXT", "").strip()
 
 EMBED_COLOR = int(os.getenv("EMBED_COLOR", "10181046"))
-SHOW_THUMBNAIL = os.getenv("SHOW_THUMBNAIL", "true").strip().lower() == "true"
 SHOW_TIMESTAMP = os.getenv("SHOW_TIMESTAMP", "true").strip().lower() == "true"
-SHOW_TAGS = os.getenv("SHOW_TAGS", "true").strip().lower() == "true"
-SHOW_STATS = os.getenv("SHOW_STATS", "true").strip().lower() == "true"
+SHOW_STEAM_LINKS = os.getenv("SHOW_STEAM_LINKS", "true").strip().lower() == "true"
+SHOW_SOURCE_LINK = os.getenv("SHOW_SOURCE_LINK", "true").strip().lower() == "true"
 
-INCLUDE_KEYWORDS = [
-    x.strip().lower()
-    for x in os.getenv("INCLUDE_KEYWORDS", "").split(",")
-    if x.strip()
-]
-EXCLUDE_KEYWORDS = [
-    x.strip().lower()
-    for x in os.getenv("EXCLUDE_KEYWORDS", "").split(",")
-    if x.strip()
-]
+STEAM_SEARCH_CACHE: dict[str, dict[str, Any] | None] = {}
+STEAM_LOOKUPS_USED = 0
 
 
 def log(message: str) -> None:
@@ -62,7 +58,7 @@ def utc_now_iso() -> str:
 def load_state() -> dict[str, Any]:
     if not STATE_FILE.exists():
         return {
-            "version": 3,
+            "version": 4,
             "feed_url": "",
             "feed_title": "",
             "etag": "",
@@ -77,7 +73,7 @@ def load_state() -> dict[str, Any]:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise ValueError("state file must be an object")
-        data.setdefault("version", 3)
+        data.setdefault("version", 4)
         data.setdefault("feed_url", "")
         data.setdefault("feed_title", "")
         data.setdefault("etag", "")
@@ -90,7 +86,7 @@ def load_state() -> dict[str, Any]:
     except Exception as exc:
         log(f"Warning: resetting unreadable state file: {exc}")
         return {
-            "version": 3,
+            "version": 4,
             "feed_url": "",
             "feed_title": "",
             "etag": "",
@@ -103,12 +99,17 @@ def load_state() -> dict[str, Any]:
 
 
 def save_state(state: dict[str, Any]) -> None:
-    state["version"] = 3
+    state["version"] = 4
     state["last_run_at"] = utc_now_iso()
     STATE_FILE.write_text(
         json.dumps(state, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+
+
+def trim_seen_ids(seen_ids: list[str]) -> list[str]:
+    deduped = list(OrderedDict.fromkeys(seen_ids))
+    return deduped[-SEEN_IDS_LIMIT:]
 
 
 def clean_text(value: Any, limit: int = 300) -> str:
@@ -143,20 +144,6 @@ def strip_boilerplate(text: str) -> str:
     for pattern in patterns:
         text = re.sub(pattern, "", text, flags=re.IGNORECASE).strip()
     return text
-
-
-def extract_first_image_url(raw_html: str | None) -> str | None:
-    if not raw_html:
-        return None
-
-    match = re.search(
-        r"""<img[^>]+src=["'](https?://[^"' >]+)["']""",
-        raw_html,
-        flags=re.IGNORECASE,
-    )
-    if match:
-        return match.group(1)
-    return None
 
 
 def stable_entry_id(entry: dict[str, Any]) -> str:
@@ -197,39 +184,6 @@ def display_date(entry: dict[str, Any]) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%b %d, %Y")
 
 
-def choose_thumbnail(entry: dict[str, Any]) -> str | None:
-    sources: list[str | None] = []
-
-    media_thumbnail = entry.get("media_thumbnail")
-    if isinstance(media_thumbnail, list) and media_thumbnail:
-        sources.append(media_thumbnail[0].get("url"))
-
-    media_content = entry.get("media_content")
-    if isinstance(media_content, list) and media_content:
-        sources.append(media_content[0].get("url"))
-
-    image = entry.get("image")
-    if isinstance(image, dict):
-        sources.append(image.get("href"))
-
-    summary_html = entry.get("summary") or entry.get("description")
-    sources.append(extract_first_image_url(summary_html))
-
-    links = entry.get("links")
-    if isinstance(links, list):
-        for link in links:
-            href = link.get("href")
-            mime_type = str(link.get("type") or "")
-            if mime_type.startswith("image/"):
-                sources.append(href)
-
-    for source in sources:
-        if isinstance(source, str) and source.startswith(("http://", "https://")):
-            return source
-
-    return None
-
-
 def fetch_feed(feed_url: str, etag: str = "", modified: str = ""):
     kwargs: dict[str, Any] = {
         "agent": USER_AGENT,
@@ -263,13 +217,12 @@ def normalize_title(raw_title: str, feed_title: str) -> str:
 
     if title and title.lower() != feed_title.lower():
         return title
-
     return "New update"
 
 
 def summarize_entry(entry: dict[str, Any]) -> str:
     raw = entry.get("summary") or entry.get("description") or entry.get("content") or ""
-    text = clean_text(raw, SUMMARY_LIMIT * 3)
+    text = clean_text(raw, SUMMARY_LIMIT * 4)
     text = strip_boilerplate(text)
 
     if not text:
@@ -284,109 +237,256 @@ def summarize_entry(entry: dict[str, Any]) -> str:
     return text
 
 
-def extract_tags(entry: dict[str, Any]) -> list[str]:
-    tags: list[str] = []
-
-    raw_tags = entry.get("tags")
-    if isinstance(raw_tags, list):
-        for tag in raw_tags:
-            term = clean_text(tag.get("term"), 40)
-            if term:
-                tags.append(term)
-
-    raw_title = clean_text(entry.get("title"), 300)
-    if "upcoming repacks" in raw_title.lower():
-        tags.insert(0, "Upcoming")
-
-    deduped = list(OrderedDict.fromkeys(tags))
-    return deduped[:4]
+def slugify_for_compare(text: str) -> str:
+    text = clean_text(text, 300).lower()
+    text = re.sub(r"\[[^\]]+\]", " ", text)
+    text = re.sub(r"\([^)]*(build|edition|v\d+|update)[^)]*\)", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
-def classify_entry(entry: dict[str, Any]) -> str:
-    title = clean_text(entry.get("title"), 300).lower()
-    summary = summarize_entry(entry).lower()
-    text = f"{title} {summary}"
-
-    if "upcoming repacks" in text:
-        return "Upcoming Release"
-    if "repack" in text:
-        return "Repack Update"
-    if "patch" in text or "hotfix" in text or "update" in text:
-        return "Update"
-    return "News"
-
-
-def matches_filters(entry: dict[str, Any]) -> bool:
-    haystack = (
-        clean_text(entry.get("title"), 400)
-        + " "
-        + clean_text(entry.get("summary") or entry.get("description"), 800)
-    ).lower()
-
-    if INCLUDE_KEYWORDS and not any(keyword in haystack for keyword in INCLUDE_KEYWORDS):
-        return False
-
-    if EXCLUDE_KEYWORDS and any(keyword in haystack for keyword in EXCLUDE_KEYWORDS):
-        return False
-
-    return True
+def cleanup_game_name(text: str) -> str:
+    text = clean_text(text, 200)
+    text = strip_boilerplate(text)
+    text = re.sub(r"^\s*[•\-–—>*→]+\s*", "", text)
+    text = re.sub(r"\[[^\]]+\]", "", text)
+    text = re.sub(r"\s+\((latest build|build[^)]*|v[\d.]+|update[^)]*)\)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+[–—-]\s+repack.*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+[–—-]\s+will be released.*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+[–—-]\s+continue reading.*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^(upcoming repacks|fitgirl repacks?)\s*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" -–—|:;,.")
+    return text
 
 
-def build_embed(feed_title: str, entry: dict[str, Any]) -> dict[str, Any]:
+def extract_game_candidates(entry: dict[str, Any], feed_title: str) -> list[str]:
     title = normalize_title(str(entry.get("title") or ""), feed_title)
-    description = summarize_entry(entry)
-    post_url = str(entry.get("link") or "").strip()
-    tags = extract_tags(entry)
-    entry_type = classify_entry(entry)
+    raw_html = str(entry.get("summary") or entry.get("description") or "")
+    raw_text = clean_text(raw_html, 5000)
+    raw_text = raw_text.replace("→", "\n")
+    raw_text = raw_text.replace("•", "\n")
+    raw_text = raw_text.replace("►", "\n")
+
+    lines = [cleanup_game_name(part) for part in raw_text.splitlines()]
+    lines = [line for line in lines if line]
+
+    candidates: list[str] = []
+
+    is_multi = "upcoming repacks" in title.lower() or len(lines) >= 3
+
+    if is_multi:
+        for line in lines:
+            if len(line) < 2:
+                continue
+            if "appeared first on" in line.lower():
+                continue
+            if "continue reading" in line.lower():
+                continue
+            if line.lower() == "upcoming repacks":
+                continue
+            candidates.append(line)
+    else:
+        candidates.append(cleanup_game_name(title))
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+
+    for candidate in candidates:
+        candidate = cleanup_game_name(candidate)
+        if not candidate:
+            continue
+        key = slugify_for_compare(candidate)
+        if not key or key in seen:
+            continue
+        if len(key) < 2:
+            continue
+        seen.add(key)
+        cleaned.append(candidate)
+
+    if not cleaned:
+        cleaned = [normalize_title(str(entry.get("title") or ""), feed_title)]
+
+    return cleaned[:MULTI_GAME_EMBEDS_LIMIT]
+
+
+def tokenize(text: str) -> set[str]:
+    return set(slugify_for_compare(text).split())
+
+
+def steam_search_score(query: str, result_title: str) -> int:
+    q = slugify_for_compare(query)
+    r = slugify_for_compare(result_title)
+
+    if not q or not r:
+        return 0
+
+    if q == r:
+        return 1000
+
+    score = 0
+    q_tokens = tokenize(q)
+    r_tokens = tokenize(r)
+
+    overlap = len(q_tokens & r_tokens)
+    score += overlap * 100
+
+    if q in r:
+        score += 250
+    if r in q:
+        score += 150
+
+    if result_title.lower().startswith(query.lower()):
+        score += 120
+
+    return score
+
+
+def steam_search_game(game_name: str) -> dict[str, Any] | None:
+    global STEAM_LOOKUPS_USED
+
+    key = slugify_for_compare(game_name)
+    if key in STEAM_SEARCH_CACHE:
+        return STEAM_SEARCH_CACHE[key]
+
+    if STEAM_LOOKUPS_USED >= STEAM_LOOKUPS_LIMIT:
+        STEAM_SEARCH_CACHE[key] = None
+        return None
+
+    STEAM_LOOKUPS_USED += 1
+    if STEAM_REQUEST_DELAY_SECONDS:
+        time.sleep(STEAM_REQUEST_DELAY_SECONDS)
+
+    url = (
+        "https://store.steampowered.com/search/?term="
+        + urllib.parse.quote_plus(game_name)
+    )
+
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": USER_AGENT},
+        method="GET",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+            html_text = resp.read().decode("utf-8", errors="replace")
+    except Exception as exc:
+        log(f"Steam lookup failed for '{game_name}': {exc}")
+        STEAM_SEARCH_CACHE[key] = None
+        return None
+
+    pattern = re.compile(
+        r'<a[^>]+href="(?P<href>https://store\.steampowered\.com/app/(?P<appid>\d+)/[^"]+)"[^>]*class="[^"]*search_result_row[^"]*"[^>]*>(?P<body>.*?)</a>',
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    best_match: dict[str, Any] | None = None
+    best_score = -1
+
+    for match in pattern.finditer(html_text):
+        href = html.unescape(match.group("href"))
+        body = match.group("body")
+
+        title_match = re.search(
+            r'<span[^>]*class="title"[^>]*>(.*?)</span>',
+            body,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        image_match = re.search(
+            r'<img[^>]+src="([^"]+)"',
+            body,
+            flags=re.IGNORECASE,
+        )
+
+        title = clean_text(title_match.group(1) if title_match else "", 200)
+        image = html.unescape(image_match.group(1)) if image_match else ""
+
+        score = steam_search_score(game_name, title)
+        if score > best_score:
+            best_score = score
+            best_match = {
+                "title": title,
+                "url": href,
+                "image": image if image.startswith(("http://", "https://")) else "",
+                "score": score,
+            }
+
+    if best_match and best_match["score"] >= 120:
+        STEAM_SEARCH_CACHE[key] = best_match
+        return best_match
+
+    STEAM_SEARCH_CACHE[key] = None
+    return None
+
+
+def build_game_embed(
+    *,
+    feed_title: str,
+    entry: dict[str, Any],
+    game_name: str,
+    steam_match: dict[str, Any] | None,
+    index: int,
+    total: int,
+) -> dict[str, Any]:
+    source_url = str(entry.get("link") or "").strip()
+    title = game_name[:256]
+
+    description_lines = []
+    description_lines.append("Listed in the latest FitGirl feed update.")
+
+    summary = summarize_entry(entry)
+    if total == 1 and summary:
+        description_lines.append("")
+        description_lines.append(summary)
 
     embed: dict[str, Any] = {
         "author": {
             "name": "FitGirl RSS",
         },
-        "title": title[:256],
-        "url": post_url or None,
-        "description": description or "New feed item published.",
+        "title": title,
+        "url": (steam_match["url"] if steam_match and steam_match.get("url") else source_url or None),
+        "description": "\n".join(description_lines)[:4096],
         "color": EMBED_COLOR,
-        "footer": {
-            "text": f"{entry_type} • {feed_title}"[:2048],
-        },
         "fields": [],
+        "footer": {
+            "text": f"Game {index} of {total} • {feed_title}"[:2048],
+        },
     }
-
-    if SHOW_STATS:
-        embed["fields"].append(
-            {
-                "name": "Published",
-                "value": display_date(entry),
-                "inline": True,
-            }
-        )
-        embed["fields"].append(
-            {
-                "name": "Category",
-                "value": entry_type,
-                "inline": True,
-            }
-        )
-
-    if SHOW_TAGS and tags:
-        embed["fields"].append(
-            {
-                "name": "Tags",
-                "value": " • ".join(tags)[:1024],
-                "inline": False,
-            }
-        )
 
     if SHOW_TIMESTAMP:
         timestamp_iso = entry_timestamp_iso(entry)
         if timestamp_iso:
             embed["timestamp"] = timestamp_iso
 
-    if SHOW_THUMBNAIL:
-        thumbnail = choose_thumbnail(entry)
-        if thumbnail:
-            embed["thumbnail"] = {"url": thumbnail}
+    if steam_match and SHOW_STEAM_LINKS:
+        embed["fields"].append(
+            {
+                "name": "Steam",
+                "value": f"[Open Store Page]({steam_match['url']})",
+                "inline": True,
+            }
+        )
+
+    if SHOW_SOURCE_LINK and source_url:
+        embed["fields"].append(
+            {
+                "name": "Source",
+                "value": f"[Open FitGirl Post]({source_url})",
+                "inline": True,
+            }
+        )
+
+    embed["fields"].append(
+        {
+            "name": "Published",
+            "value": display_date(entry),
+            "inline": True,
+        }
+    )
+
+    if steam_match and steam_match.get("image"):
+        embed["image"] = {"url": steam_match["image"]}
 
     return embed
 
@@ -439,18 +539,43 @@ def discord_post_json(url: str, payload: dict[str, Any]) -> None:
     raise RuntimeError("Webhook post failed after multiple retries")
 
 
-def post_to_discord(webhook_url: str, feed_title: str, entry: dict[str, Any]) -> None:
+def post_entry_to_discord(webhook_url: str, feed_title: str, entry: dict[str, Any]) -> None:
+    games = extract_game_candidates(entry, feed_title)
+    source_title = normalize_title(str(entry.get("title") or ""), feed_title)
+    embeds = []
+
+    for index, game_name in enumerate(games, start=1):
+        steam_match = steam_search_game(game_name)
+        embeds.append(
+            build_game_embed(
+                feed_title=feed_title,
+                entry=entry,
+                game_name=game_name,
+                steam_match=steam_match,
+                index=index,
+                total=len(games),
+            )
+        )
+
+    content_lines = []
+    if MENTION_TEXT:
+        content_lines.append(MENTION_TEXT[:2000])
+
+    if len(games) > 1:
+        content_lines.append(f"**{source_title}**")
+        content_lines.append(f"Showing {len(embeds)} game cards from this post.")
+
     payload: dict[str, Any] = {
         "username": WEBHOOK_USERNAME,
-        "embeds": [build_embed(feed_title, entry)],
+        "embeds": embeds[:10],
         "allowed_mentions": {"parse": []},
     }
 
+    if content_lines:
+        payload["content"] = "\n".join(content_lines)[:2000]
+
     if WEBHOOK_AVATAR_URL:
         payload["avatar_url"] = WEBHOOK_AVATAR_URL
-
-    if MENTION_TEXT:
-        payload["content"] = MENTION_TEXT[:2000]
 
     discord_post_json(webhook_url, payload)
 
@@ -462,17 +587,10 @@ def normalize_entries(parsed_feed) -> list[tuple[str, dict[str, Any]]]:
         eid = stable_entry_id(raw_entry)
         if not eid:
             continue
-        if not matches_filters(raw_entry):
-            continue
         items.append((eid, raw_entry))
 
     items.sort(key=lambda pair: (entry_timestamp(pair[1]), pair[0]))
     return items
-
-
-def trim_seen_ids(seen_ids: list[str]) -> list[str]:
-    deduped = list(OrderedDict.fromkeys(seen_ids))
-    return deduped[-SEEN_IDS_LIMIT:]
 
 
 def handle_first_run(
@@ -505,7 +623,7 @@ def handle_first_run(
 
     if FIRST_RUN_MODE == "latest":
         latest_eid, latest_entry = items[-1]
-        post_to_discord(webhook_url, feed_title, latest_entry)
+        post_entry_to_discord(webhook_url, feed_title, latest_entry)
         state["seen_ids"] = trim_seen_ids([eid for eid, _ in items])
         state["feed_title"] = feed_title
         state["last_status"] = "first_run_posted_latest"
@@ -517,7 +635,7 @@ def handle_first_run(
     batch = items[-MAX_POSTS_PER_RUN:]
     posted_ids: list[str] = []
     for eid, entry in batch:
-        post_to_discord(webhook_url, feed_title, entry)
+        post_entry_to_discord(webhook_url, feed_title, entry)
         posted_ids.append(eid)
         if POST_DELAY_SECONDS:
             time.sleep(POST_DELAY_SECONDS)
@@ -561,7 +679,7 @@ def main() -> int:
         return 0
 
     items = normalize_entries(parsed_feed)
-    log(f"Fetched {len(items)} matching feed item(s) from '{feed_title}'.")
+    log(f"Fetched {len(items)} feed item(s) from '{feed_title}'.")
 
     if not previous_seen_ids:
         handle_first_run(
@@ -587,7 +705,7 @@ def main() -> int:
     posted_ids: list[str] = []
 
     for eid, entry in new_items:
-        post_to_discord(DISCORD_WEBHOOK_URL, feed_title, entry)
+        post_entry_to_discord(DISCORD_WEBHOOK_URL, feed_title, entry)
         previous_seen_ids.append(eid)
         posted_ids.append(eid)
         log(f"Posted: {normalize_title(str(entry.get('title') or ''), feed_title)}")
