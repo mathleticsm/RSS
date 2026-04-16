@@ -2,50 +2,129 @@ name: RSS to Discord
 
 on:
   workflow_dispatch:
+    inputs:
+      first_run_mode:
+        description: "First-run behavior"
+        required: true
+        type: choice
+        options:
+          - seed
+          - latest
+          - all
+        default: latest
+      max_posts_per_run:
+        description: "Max new items to post this run"
+        required: true
+        type: string
+        default: "3"
   schedule:
     - cron: "*/15 * * * *"
 
 permissions:
   contents: write
 
+concurrency:
+  group: rss-to-discord-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   post-rss:
+    name: Fetch RSS and post to Discord
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      RSS_FEED_URL: ${{ secrets.RSS_FEED_URL }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+      WEBHOOK_USERNAME: FitGirl RSS
+      EMBED_COLOR: "10181046"
+      SHOW_THUMBNAIL: "true"
+      SHOW_TIMESTAMP: "true"
+      SHOW_TAGS: "true"
+      SHOW_STATS: "true"
+      SUMMARY_LIMIT: "220"
+      SEEN_IDS_LIMIT: "400"
+      POST_DELAY_SECONDS: "1"
+      REQUEST_TIMEOUT: "30"
 
     steps:
-      - name: Check out repo
-        uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: "pip"
+
+      - name: Set runtime options
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "FIRST_RUN_MODE=${{ inputs.first_run_mode }}" >> "$GITHUB_ENV"
+            echo "MAX_POSTS_PER_RUN=${{ inputs.max_posts_per_run }}" >> "$GITHUB_ENV"
+          else
+            echo "FIRST_RUN_MODE=latest" >> "$GITHUB_ENV"
+            echo "MAX_POSTS_PER_RUN=3" >> "$GITHUB_ENV"
+          fi
+
+      - name: Show effective config
+        shell: bash
+        run: |
+          echo "FIRST_RUN_MODE=$FIRST_RUN_MODE"
+          echo "MAX_POSTS_PER_RUN=$MAX_POSTS_PER_RUN"
+          echo "RSS_FEED_URL is set: $([ -n "$RSS_FEED_URL" ] && echo yes || echo no)"
+          echo "DISCORD_WEBHOOK_URL is set: $([ -n "$DISCORD_WEBHOOK_URL" ] && echo yes || echo no)"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Run RSS poster
-        env:
-          RSS_FEED_URL: ${{ secrets.RSS_FEED_URL }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          WEBHOOK_USERNAME: FitGirl RSS
-          MAX_POSTS_PER_RUN: "5"
-          FIRST_RUN_MODE: "latest"
-          EMBED_COLOR: "16711808"
-          SHOW_THUMBNAIL: "true"
-          SHOW_TIMESTAMP: "true"
-          SUMMARY_LIMIT: "500"
+        shell: bash
         run: python rss_to_discord.py
 
-      - name: Commit updated state
+      - name: Show state file info
+        if: always()
+        shell: bash
+        run: |
+          if [ -f .rss_state.json ]; then
+            echo "State file exists"
+            ls -lh .rss_state.json
+            echo "Preview:"
+            python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path(".rss_state.json")
+          if p.exists():
+              data = json.loads(p.read_text(encoding="utf-8"))
+              print({
+                  "version": data.get("version"),
+                  "feed_title": data.get("feed_title"),
+                  "last_status": data.get("last_status"),
+                  "last_posted_ids": data.get("last_posted_ids", []),
+              })
+          PY
+          else
+            echo "No state file found"
+          fi
+
+      - name: Commit updated RSS state
+        shell: bash
         run: |
           if [ ! -f .rss_state.json ]; then
-            echo "No state file yet"
+            echo "No state file to commit."
             exit 0
           fi
 
-          if git diff --quiet .rss_state.json; then
-            echo "No state changes"
+          STATUS="$(git status --porcelain -- .rss_state.json)"
+          if [ -z "$STATUS" ]; then
+            echo "No state changes."
             exit 0
           fi
 
