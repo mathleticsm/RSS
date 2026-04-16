@@ -12,37 +12,31 @@ on:
           - latest
           - all
         default: latest
-
       max_posts_per_run:
         description: "How many new feed items to post this run"
         required: true
         type: string
         default: "2"
-
       multi_game_embeds_limit:
         description: "Max game cards taken from one feed item"
         required: true
         type: string
         default: "8"
-
       steam_lookups_limit:
         description: "Max Steam lookups per run"
         required: true
         type: string
         default: "6"
-
       summary_limit:
         description: "Embed summary length"
         required: true
         type: string
         default: "140"
-
       mention_text:
         description: "Optional message prefix for this manual run"
         required: false
         type: string
         default: ""
-
       reset_state:
         description: "Delete .rss_state.json before running"
         required: true
@@ -178,22 +172,7 @@ jobs:
           if [ -f .rss_state.json ]; then
             echo "State file found."
             ls -lh .rss_state.json
-            python - <<'PY'
-            import json
-            from pathlib import Path
-
-            path = Path(".rss_state.json")
-            data = json.loads(path.read_text(encoding="utf-8"))
-
-            print("State preview:")
-            print({
-                "version": data.get("version"),
-                "feed_title": data.get("feed_title"),
-                "last_status": data.get("last_status"),
-                "last_posted_ids": data.get("last_posted_ids", []),
-                "last_run_at": data.get("last_run_at"),
-            })
-            PY
+            python -c "import json; from pathlib import Path; data=json.loads(Path('.rss_state.json').read_text(encoding='utf-8')); print('State preview:'); print({'version': data.get('version'), 'feed_title': data.get('feed_title'), 'last_status': data.get('last_status'), 'last_posted_ids': data.get('last_posted_ids', []), 'last_run_at': data.get('last_run_at')})"
           else
             echo "No .rss_state.json file present."
           fi
