@@ -178,22 +178,22 @@ jobs:
           if [ -f .rss_state.json ]; then
             echo "State file found."
             ls -lh .rss_state.json
-            python -c "
-import json
-from pathlib import Path
+            python - <<'PY'
+            import json
+            from pathlib import Path
 
-path = Path('.rss_state.json')
-data = json.loads(path.read_text(encoding='utf-8'))
+            path = Path(".rss_state.json")
+            data = json.loads(path.read_text(encoding="utf-8"))
 
-print('State preview:')
-print({
-    'version': data.get('version'),
-    'feed_title': data.get('feed_title'),
-    'last_status': data.get('last_status'),
-    'last_posted_ids': data.get('last_posted_ids', []),
-    'last_run_at': data.get('last_run_at'),
-})
-"
+            print("State preview:")
+            print({
+                "version": data.get("version"),
+                "feed_title": data.get("feed_title"),
+                "last_status": data.get("last_status"),
+                "last_posted_ids": data.get("last_posted_ids", []),
+                "last_run_at": data.get("last_run_at"),
+            })
+            PY
           else
             echo "No .rss_state.json file present."
           fi
