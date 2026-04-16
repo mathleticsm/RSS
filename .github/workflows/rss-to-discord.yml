@@ -12,34 +12,44 @@ on:
           - latest
           - all
         default: latest
+
       max_posts_per_run:
         description: "How many new feed items to post this run"
         required: true
         type: string
         default: "2"
+
       multi_game_embeds_limit:
-        description: "Max game cards to show from one feed item"
+        description: "Max game cards taken from one feed item"
         required: true
         type: string
         default: "8"
+
       steam_lookups_limit:
         description: "Max Steam lookups per run"
         required: true
         type: string
         default: "6"
-      mention_text:
-        description: "Optional message prefix for manual runs"
-        required: false
-        type: string
-        default: ""
+
       summary_limit:
         description: "Embed summary length"
         required: true
         type: string
         default: "140"
 
+      mention_text:
+        description: "Optional message prefix for this manual run"
+        required: false
+        type: string
+        default: ""
+
+      reset_state:
+        description: "Delete .rss_state.json before running"
+        required: true
+        type: boolean
+        default: false
+
   schedule:
-    # Avoid the top of the hour, which GitHub says is a busier time for scheduled jobs.
     - cron: "7,22,37,52 * * * *"
 
 permissions:
@@ -71,12 +81,11 @@ jobs:
       REQUEST_TIMEOUT: "30"
       POST_DELAY_SECONDS: "1"
       STEAM_REQUEST_DELAY_SECONDS: "0.6"
-      SEEN_IDS_LIMIT: "500"
 
+      SEEN_IDS_LIMIT: "500"
       INCLUDE_KEYWORDS: ""
       EXCLUDE_KEYWORDS: ""
 
-      # Scheduled-run defaults. Manual runs can override these below.
       FIRST_RUN_MODE: "latest"
       MAX_POSTS_PER_RUN: "2"
       MULTI_GAME_EMBEDS_LIMIT: "8"
@@ -130,12 +139,18 @@ jobs:
             exit 1
           fi
 
+      - name: Reset state file
+        if: github.event_name == 'workflow_dispatch' && inputs.reset_state
+        shell: bash
+        run: |
+          rm -f .rss_state.json
+          echo "Deleted .rss_state.json"
+
       - name: Show effective configuration
         shell: bash
         run: |
           echo "Workflow event: ${{ github.event_name }}"
           echo "Branch: ${{ github.ref_name }}"
-          echo "Python: 3.12"
           echo "FIRST_RUN_MODE=$FIRST_RUN_MODE"
           echo "MAX_POSTS_PER_RUN=$MAX_POSTS_PER_RUN"
           echo "MULTI_GAME_EMBEDS_LIMIT=$MULTI_GAME_EMBEDS_LIMIT"
@@ -144,11 +159,13 @@ jobs:
           echo "RSS_FEED_URL configured: yes"
           echo "DISCORD_WEBHOOK_URL configured: yes"
 
-      - name: Upgrade pip and install dependencies
+      - name: Upgrade pip
         shell: bash
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+        run: python -m pip install --upgrade pip
+
+      - name: Install dependencies
+        shell: bash
+        run: pip install -r requirements.txt
 
       - name: Run RSS poster
         shell: bash
@@ -161,22 +178,22 @@ jobs:
           if [ -f .rss_state.json ]; then
             echo "State file found."
             ls -lh .rss_state.json
-            python - <<'PY'
-            import json
-            from pathlib import Path
+            python -c "
+import json
+from pathlib import Path
 
-            path = Path(".rss_state.json")
-            data = json.loads(path.read_text(encoding="utf-8"))
+path = Path('.rss_state.json')
+data = json.loads(path.read_text(encoding='utf-8'))
 
-            print("State preview:")
-            print({
-                "version": data.get("version"),
-                "feed_title": data.get("feed_title"),
-                "last_status": data.get("last_status"),
-                "last_posted_ids": data.get("last_posted_ids", []),
-                "last_run_at": data.get("last_run_at"),
-            })
-            PY
+print('State preview:')
+print({
+    'version': data.get('version'),
+    'feed_title': data.get('feed_title'),
+    'last_status': data.get('last_status'),
+    'last_posted_ids': data.get('last_posted_ids', []),
+    'last_run_at': data.get('last_run_at'),
+})
+"
           else
             echo "No .rss_state.json file present."
           fi
@@ -198,9 +215,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Best effort: sync first in case the branch advanced.
           git pull --rebase origin "${GITHUB_REF_NAME}" || true
-
           git add .rss_state.json
           git commit -m "Update RSS state"
           git push
