@@ -16,17 +16,14 @@ import feedparser
 
 STATE_FILE = Path(".rss_state.json")
 
-# Required
 RSS_FEED_URL = os.getenv("RSS_FEED_URL", "").strip()
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 
-# Runtime behavior
 FIRST_RUN_MODE = os.getenv("FIRST_RUN_MODE", "seed").strip().lower()  # seed | latest | all
 MAX_POSTS_PER_RUN = max(1, int(os.getenv("MAX_POSTS_PER_RUN", "2")))
 MULTI_GAME_EMBEDS_LIMIT = max(1, min(25, int(os.getenv("MULTI_GAME_EMBEDS_LIMIT", "8"))))
 SEEN_IDS_LIMIT = max(50, int(os.getenv("SEEN_IDS_LIMIT", "500")))
 
-# Display
 WEBHOOK_USERNAME = os.getenv("WEBHOOK_USERNAME", "FitGirl RSS").strip()
 WEBHOOK_AVATAR_URL = os.getenv("WEBHOOK_AVATAR_URL", "").strip()
 MENTION_TEXT = os.getenv("MENTION_TEXT", "").strip()
@@ -37,17 +34,15 @@ SHOW_TIMESTAMP = os.getenv("SHOW_TIMESTAMP", "true").strip().lower() == "true"
 SHOW_SOURCE_LINK = os.getenv("SHOW_SOURCE_LINK", "true").strip().lower() == "true"
 SHOW_STEAM_LINKS = os.getenv("SHOW_STEAM_LINKS", "true").strip().lower() == "true"
 
-# Requests
 REQUEST_TIMEOUT = max(5, int(os.getenv("REQUEST_TIMEOUT", "30")))
 POST_DELAY_SECONDS = max(0.0, float(os.getenv("POST_DELAY_SECONDS", "1")))
 STEAM_REQUEST_DELAY_SECONDS = max(0.0, float(os.getenv("STEAM_REQUEST_DELAY_SECONDS", "0.6")))
 STEAM_LOOKUPS_LIMIT = max(1, int(os.getenv("STEAM_LOOKUPS_LIMIT", "6")))
 USER_AGENT = os.getenv(
     "USER_AGENT",
-    "rss-to-discord-actions/5.0 (+https://github.com/actions)",
+    "rss-to-discord-actions/6.0 (+https://github.com/actions)",
 ).strip()
 
-# Filters (optional)
 INCLUDE_KEYWORDS = [
     x.strip().lower()
     for x in os.getenv("INCLUDE_KEYWORDS", "").split(",")
@@ -59,7 +54,6 @@ EXCLUDE_KEYWORDS = [
     if x.strip()
 ]
 
-# Discord limits
 DISCORD_MAX_EMBEDS_PER_MESSAGE = 10
 
 STEAM_SEARCH_CACHE: dict[str, dict[str, Any] | None] = {}
@@ -76,7 +70,7 @@ def utc_now_iso() -> str:
 
 def default_state() -> dict[str, Any]:
     return {
-        "version": 5,
+        "version": 6,
         "feed_url": "",
         "feed_title": "",
         "etag": "",
@@ -96,7 +90,6 @@ def load_state() -> dict[str, Any]:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise ValueError("state file must be a JSON object")
-
         base = default_state()
         base.update(data)
         return base
@@ -108,7 +101,7 @@ def load_state() -> dict[str, Any]:
 
 
 def save_state(state: dict[str, Any]) -> None:
-    state["version"] = 5
+    state["version"] = 6
     state["last_run_at"] = utc_now_iso()
     STATE_FILE.write_text(
         json.dumps(state, indent=2, ensure_ascii=False),
@@ -117,8 +110,7 @@ def save_state(state: dict[str, Any]) -> None:
 
 
 def trim_seen_ids(seen_ids: list[str]) -> list[str]:
-    deduped = list(OrderedDict.fromkeys(seen_ids))
-    return deduped[-SEEN_IDS_LIMIT:]
+    return list(OrderedDict.fromkeys(seen_ids))[-SEEN_IDS_LIMIT:]
 
 
 def clean_text(value: Any, limit: int = 300) -> str:
@@ -211,7 +203,7 @@ def fetch_feed(feed_url: str, etag: str = "", modified: str = ""):
     kwargs: dict[str, Any] = {
         "agent": USER_AGENT,
         "request_headers": {
-            "Accept": "application/rss+xml, application/atom+xml, text/xml, application/xml"
+            "Accept": "application/rss+xml, application/atom+xml, text/xml, application/xml",
         },
     }
 
@@ -221,8 +213,8 @@ def fetch_feed(feed_url: str, etag: str = "", modified: str = ""):
         kwargs["modified"] = modified
 
     parsed = feedparser.parse(feed_url, **kwargs)
-
     status = int(getattr(parsed, "status", 200) or 200)
+
     if status >= 400:
         raise RuntimeError(f"Feed request failed with HTTP {status}")
 
@@ -310,7 +302,12 @@ def cleanup_game_name(text: str) -> str:
     text = strip_boilerplate(text)
     text = re.sub(r"^\s*[•\-–—>*→]+\s*", "", text)
     text = re.sub(r"\[[^\]]+\]", "", text)
-    text = re.sub(r"\s+\((latest build|build[^)]*|v[\d.]+|update[^)]*)\)", "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\s+\((latest build|build[^)]*|v[\d.]+|update[^)]*)\)",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
     text = re.sub(r"\s+[–—-]\s+repack.*$", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+[–—-]\s+will be released.*$", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+[–—-]\s+continue reading.*$", "", text, flags=re.IGNORECASE)
@@ -351,7 +348,6 @@ def extract_game_candidates(entry: dict[str, Any], feed_title: str) -> list[str]
     lines = [line for line in lines if line]
 
     is_multi = "upcoming repacks" in title.lower() or len(lines) >= 3
-
     candidates: list[str] = []
 
     if is_multi:
@@ -403,11 +399,9 @@ def steam_search_score(query: str, result_title: str) -> int:
     if q == r:
         return 1000
 
-    q_tokens = tokenize(q)
-    r_tokens = tokenize(r)
-    overlap = len(q_tokens & r_tokens)
-
-    score = overlap * 100
+    score = 0
+    overlap = len(tokenize(q) & tokenize(r))
+    score += overlap * 100
 
     if q in r:
         score += 250
@@ -450,7 +444,7 @@ def steam_search_game(game_name: str) -> dict[str, Any] | None:
         return None
 
     pattern = re.compile(
-        r'<a[^>]+href="(?P<href>https://store\.steampowered\.com/app/(?P<appid>\d+)/[^"]+)"[^>]*class="[^"]*search_result_row[^"]*"[^>]*>(?P<body>.*?)</a>',
+        r'<a[^>]+href="(?P<href>https://store\.steampowered\.com/app/\d+/[^"]+)"[^>]*class="[^"]*search_result_row[^"]*"[^>]*>(?P<body>.*?)</a>',
         flags=re.IGNORECASE | re.DOTALL,
     )
 
@@ -587,7 +581,7 @@ def build_premium_description(
             SUMMARY_LIMIT,
         ))
     else:
-        lines.append("Listed in the latest multi-game FitGirl update.")
+        lines.append("Featured in the latest FitGirl multi-game roundup.")
 
     return "\n".join(lines)[:4096]
 
