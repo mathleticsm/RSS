@@ -13,12 +13,34 @@ on:
           - all
         default: latest
       max_posts_per_run:
-        description: "Max new items to post this run"
+        description: "How many new feed items to post this run"
         required: true
         type: string
-        default: "3"
+        default: "2"
+      multi_game_embeds_limit:
+        description: "Max game cards to show from one feed item"
+        required: true
+        type: string
+        default: "8"
+      steam_lookups_limit:
+        description: "Max Steam lookups per run"
+        required: true
+        type: string
+        default: "6"
+      mention_text:
+        description: "Optional message prefix for manual runs"
+        required: false
+        type: string
+        default: ""
+      summary_limit:
+        description: "Embed summary length"
+        required: true
+        type: string
+        default: "140"
+
   schedule:
-    - cron: "*/15 * * * *"
+    # Avoid the top of the hour, which GitHub says is a busier time for scheduled jobs.
+    - cron: "7,22,37,52 * * * *"
 
 permissions:
   contents: write
@@ -37,16 +59,29 @@ jobs:
       RSS_FEED_URL: ${{ secrets.RSS_FEED_URL }}
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
 
-      WEBHOOK_USERNAME: FitGirl RSS
+      WEBHOOK_USERNAME: FitGirl Premium
+      WEBHOOK_AVATAR_URL: ""
+      MENTION_TEXT: ""
+
       EMBED_COLOR: "10181046"
-      SHOW_THUMBNAIL: "true"
       SHOW_TIMESTAMP: "true"
-      SHOW_TAGS: "true"
-      SHOW_STATS: "true"
-      SUMMARY_LIMIT: "220"
-      SEEN_IDS_LIMIT: "400"
-      POST_DELAY_SECONDS: "1"
+      SHOW_SOURCE_LINK: "true"
+      SHOW_STEAM_LINKS: "true"
+
       REQUEST_TIMEOUT: "30"
+      POST_DELAY_SECONDS: "1"
+      STEAM_REQUEST_DELAY_SECONDS: "0.6"
+      SEEN_IDS_LIMIT: "500"
+
+      INCLUDE_KEYWORDS: ""
+      EXCLUDE_KEYWORDS: ""
+
+      # Scheduled-run defaults. Manual runs can override these below.
+      FIRST_RUN_MODE: "latest"
+      MAX_POSTS_PER_RUN: "2"
+      MULTI_GAME_EMBEDS_LIMIT: "8"
+      STEAM_LOOKUPS_LIMIT: "6"
+      SUMMARY_LIMIT: "140"
 
     steps:
       - name: Check out repository
@@ -59,27 +94,57 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
+          cache-dependency-path: requirements.txt
 
-      - name: Set runtime options
+      - name: Apply manual-run overrides
+        if: github.event_name == 'workflow_dispatch'
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "FIRST_RUN_MODE=${{ inputs.first_run_mode }}" >> "$GITHUB_ENV"
-            echo "MAX_POSTS_PER_RUN=${{ inputs.max_posts_per_run }}" >> "$GITHUB_ENV"
-          else
-            echo "FIRST_RUN_MODE=latest" >> "$GITHUB_ENV"
-            echo "MAX_POSTS_PER_RUN=3" >> "$GITHUB_ENV"
+          echo "FIRST_RUN_MODE=${{ inputs.first_run_mode }}" >> "$GITHUB_ENV"
+          echo "MAX_POSTS_PER_RUN=${{ inputs.max_posts_per_run }}" >> "$GITHUB_ENV"
+          echo "MULTI_GAME_EMBEDS_LIMIT=${{ inputs.multi_game_embeds_limit }}" >> "$GITHUB_ENV"
+          echo "STEAM_LOOKUPS_LIMIT=${{ inputs.steam_lookups_limit }}" >> "$GITHUB_ENV"
+          echo "SUMMARY_LIMIT=${{ inputs.summary_limit }}" >> "$GITHUB_ENV"
+          {
+            echo "MENTION_TEXT<<EOF"
+            echo "${{ inputs.mention_text }}"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          missing=0
+
+          if [ -z "${RSS_FEED_URL}" ]; then
+            echo "::error::Missing repository secret RSS_FEED_URL"
+            missing=1
           fi
 
-      - name: Show effective config
+          if [ -z "${DISCORD_WEBHOOK_URL}" ]; then
+            echo "::error::Missing repository secret DISCORD_WEBHOOK_URL"
+            missing=1
+          fi
+
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Show effective configuration
         shell: bash
         run: |
+          echo "Workflow event: ${{ github.event_name }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Python: 3.12"
           echo "FIRST_RUN_MODE=$FIRST_RUN_MODE"
           echo "MAX_POSTS_PER_RUN=$MAX_POSTS_PER_RUN"
-          echo "RSS_FEED_URL is set: $([ -n "$RSS_FEED_URL" ] && echo yes || echo no)"
-          echo "DISCORD_WEBHOOK_URL is set: $([ -n "$DISCORD_WEBHOOK_URL" ] && echo yes || echo no)"
+          echo "MULTI_GAME_EMBEDS_LIMIT=$MULTI_GAME_EMBEDS_LIMIT"
+          echo "STEAM_LOOKUPS_LIMIT=$STEAM_LOOKUPS_LIMIT"
+          echo "SUMMARY_LIMIT=$SUMMARY_LIMIT"
+          echo "RSS_FEED_URL configured: yes"
+          echo "DISCORD_WEBHOOK_URL configured: yes"
 
-      - name: Install dependencies
+      - name: Upgrade pip and install dependencies
         shell: bash
         run: |
           python -m pip install --upgrade pip
@@ -89,32 +154,35 @@ jobs:
         shell: bash
         run: python rss_to_discord.py
 
-      - name: Show state file info
+      - name: Print state summary
         if: always()
         shell: bash
         run: |
           if [ -f .rss_state.json ]; then
-            echo "State file exists"
+            echo "State file found."
             ls -lh .rss_state.json
-            echo "Preview:"
             python - <<'PY'
-          import json
-          from pathlib import Path
-          p = Path(".rss_state.json")
-          if p.exists():
-              data = json.loads(p.read_text(encoding="utf-8"))
-              print({
-                  "version": data.get("version"),
-                  "feed_title": data.get("feed_title"),
-                  "last_status": data.get("last_status"),
-                  "last_posted_ids": data.get("last_posted_ids", []),
-              })
-          PY
+            import json
+            from pathlib import Path
+
+            path = Path(".rss_state.json")
+            data = json.loads(path.read_text(encoding="utf-8"))
+
+            print("State preview:")
+            print({
+                "version": data.get("version"),
+                "feed_title": data.get("feed_title"),
+                "last_status": data.get("last_status"),
+                "last_posted_ids": data.get("last_posted_ids", []),
+                "last_run_at": data.get("last_run_at"),
+            })
+            PY
           else
-            echo "No state file found"
+            echo "No .rss_state.json file present."
           fi
 
       - name: Commit updated RSS state
+        if: always()
         shell: bash
         run: |
           if [ ! -f .rss_state.json ]; then
@@ -122,14 +190,17 @@ jobs:
             exit 0
           fi
 
-          STATUS="$(git status --porcelain -- .rss_state.json)"
-          if [ -z "$STATUS" ]; then
-            echo "No state changes."
+          if [ -z "$(git status --porcelain -- .rss_state.json)" ]; then
+            echo "No state changes to commit."
             exit 0
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Best effort: sync first in case the branch advanced.
+          git pull --rebase origin "${GITHUB_REF_NAME}" || true
+
           git add .rss_state.json
           git commit -m "Update RSS state"
           git push
