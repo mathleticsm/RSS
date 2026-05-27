@@ -2,8 +2,8 @@
   "version": 6,
   "feed_url": "https://fitgirl-repacks.site/feed/",
   "feed_title": "FitGirl Repacks",
-  "etag": "\"5ce2889c41d311acaab0420dc029207c\"",
-  "modified": "Wed, 27 May 2026 15:31:24 GMT",
+  "etag": "\"d7f308d54b100226d5d76c1021ee9e09\"",
+  "modified": "Wed, 27 May 2026 18:31:27 GMT",
   "seen_ids": [
     "https://fitgirl-repacks.site/?p=18961",
     "https://fitgirl-repacks.site/?p=75621",
@@ -324,12 +324,14 @@
     "https://fitgirl-repacks.site/?p=77237",
     "https://fitgirl-repacks.site/?p=77231",
     "https://fitgirl-repacks.site/?p=74781",
-    "https://fitgirl-repacks.site/?p=77260"
+    "https://fitgirl-repacks.site/?p=77260",
+    "https://fitgirl-repacks.site/?p=77245",
+    "https://fitgirl-repacks.site/?p=77255"
   ],
-  "last_run_at": "2026-05-27T16:08:55.914762+00:00",
+  "last_run_at": "2026-05-27T18:36:36.541968+00:00",
   "last_status": "posted_2",
   "last_posted_ids": [
-    "https://fitgirl-repacks.site/?p=74781",
-    "https://fitgirl-repacks.site/?p=77260"
+    "https://fitgirl-repacks.site/?p=77245",
+    "https://fitgirl-repacks.site/?p=77255"
   ]
 }
