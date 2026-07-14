@@ -2,8 +2,8 @@
   "version": 6,
   "feed_url": "https://fitgirl-repacks.site/feed/",
   "feed_title": "FitGirl Repacks",
-  "etag": "\"ff6b740d7e908abbb3fcd2e4b196991d\"",
-  "modified": "Tue, 14 Jul 2026 00:45:11 GMT",
+  "etag": "\"0be6b34cef9d9a425fb78f1338a599e2\"",
+  "modified": "Tue, 14 Jul 2026 03:45:13 GMT",
   "seen_ids": [
     "https://fitgirl-repacks.site/?p=38638",
     "https://fitgirl-repacks.site/?p=76733",
@@ -506,7 +506,7 @@
     "https://fitgirl-repacks.site/?p=79045",
     "https://fitgirl-repacks.site/?p=79049"
   ],
-  "last_run_at": "2026-07-14T00:59:08.506322+00:00",
+  "last_run_at": "2026-07-14T04:13:08.121690+00:00",
   "last_status": "no_new_items",
   "last_posted_ids": []
 }
